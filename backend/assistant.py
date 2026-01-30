@@ -265,12 +265,28 @@ class AssistantLoop:
             except asyncio.CancelledError:
                 break
             except Exception as e:
+                err_str = str(e)
                 if hasattr(e, "exceptions"):
                     for err in e.exceptions:
                         print(f"[KANA] Connection error: {err}")
+                    err_str = " ".join(str(x) for x in e.exceptions)
                 else:
                     print(f"[KANA] Connection error: {e}")
                 if self.stop_event.is_set():
+                    break
+                if "leaked" in err_str.lower():
+                    if self.on_error:
+                        self.on_error(
+                            "Ключ Gemini помечен как скомпрометированный. "
+                            "Создайте новый ключ: https://aistudio.google.com/apikey и укажите его в .env (GEMINI_API_KEY)."
+                        )
+                    break
+                if "not implemented" in err_str.lower() or "not supported" in err_str.lower() or "not enabled" in err_str.lower():
+                    if self.on_error:
+                        self.on_error(
+                            "Live API недоступен для этого ключа или региона. "
+                            "Проверьте: https://ai.google.dev/gemini-api/docs/live — возможно, нужен доступ по allowlist или другой регион."
+                        )
                     break
                 await asyncio.sleep(1)
 

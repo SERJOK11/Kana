@@ -9,10 +9,14 @@
     "start": "npx electron ."
   },
   "dependencies": {
+    "@pixiv/three-vrm": "^3.4.5",
+    "@react-three/drei": "^9.122.0",
+    "@react-three/fiber": "^8.18.0",
     "lucide-react": "^0.300.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "socket.io-client": "^4.7.4"
+    "socket.io-client": "^4.7.4",
+    "three": "^0.182.0"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.2.1",

@@ -10,7 +10,12 @@ export function AssistantProvider({ children }) {
   const [isListening, setIsListening] = useState(false);
   const [isMuted, setIsMuted] = useState(true);
   const [error, setError] = useState(null);
+  const [audioLevel, setAudioLevel] = useState(0);
+  const [isAssistantSpeaking, setIsAssistantSpeaking] = useState(false);
   const updateTimeoutRef = useRef(null);
+  const audioLevelRef = useRef(0);
+  const SPEAKING_THRESHOLD = 0.02;
+  const SMOOTHING = 0.35;
 
   useEffect(() => {
     socket.on('connect', () => setConnectionStatus('connected'));
@@ -49,7 +54,23 @@ export function AssistantProvider({ children }) {
         updateTimeoutRef.current = null;
       }, 1000);
     });
-    socket.on('audio_data', () => { /* optional: drive visualizer */ });
+    socket.on('audio_data', (payload) => {
+      const raw = payload?.data;
+      if (!raw || !Array.isArray(raw) || raw.length < 2) return;
+      const bytes = new Uint8Array(raw);
+      const samples = new Int16Array(bytes.buffer);
+      let sum = 0;
+      for (let i = 0; i < samples.length; i++) {
+        const n = samples[i] / 32768;
+        sum += n * n;
+      }
+      const rms = Math.sqrt(sum / samples.length);
+      const normalized = Math.min(1, rms * 4);
+      const smoothed = audioLevelRef.current * (1 - SMOOTHING) + normalized * SMOOTHING;
+      audioLevelRef.current = smoothed;
+      setAudioLevel(smoothed);
+      setIsAssistantSpeaking(smoothed > SPEAKING_THRESHOLD);
+    });
     socket.on('error', (data) => setError(data?.msg || 'Error'));
 
     return () => {
@@ -96,6 +117,8 @@ export function AssistantProvider({ children }) {
     isListening,
     isMuted,
     error,
+    audioLevel,
+    isAssistantSpeaking,
     startAudio,
     stopAudio,
     toggleMute,
