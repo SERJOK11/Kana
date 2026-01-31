@@ -19,10 +19,14 @@ if sys.version_info < (3, 11, 0):
     asyncio.TaskGroup = taskgroup.TaskGroup
     asyncio.ExceptionGroup = exceptiongroup.ExceptionGroup
 
-# Load .env from KANA/ or KANA/backend/
-_load_env = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".env")
-if os.path.isfile(_load_env):
-    load_dotenv(_load_env)
+# Load .env from backend/, then KANA/, then current dir
+_backend_dir = os.path.dirname(os.path.abspath(__file__))
+_load_env_backend = os.path.join(_backend_dir, ".env")
+_load_env_root = os.path.join(_backend_dir, "..", ".env")
+if os.path.isfile(_load_env_backend):
+    load_dotenv(_load_env_backend)
+if os.path.isfile(_load_env_root):
+    load_dotenv(_load_env_root)
 load_dotenv()
 client = genai.Client(http_options={"api_version": "v1beta"}, api_key=os.getenv("GEMINI_API_KEY"))
 
@@ -32,6 +36,7 @@ SEND_SAMPLE_RATE = 16000
 RECEIVE_SAMPLE_RATE = 24000
 CHUNK_SIZE = 1024
 MODEL = "models/gemini-2.5-flash-native-audio-preview-12-2025"
+CONNECT_TIMEOUT_SEC = 30
 
 pya = pyaudio.PyAudio()
 
@@ -64,6 +69,8 @@ class AssistantLoop:
         on_audio_data=None,
         on_transcription=None,
         on_error=None,
+        on_ready=None,
+        on_stopped=None,
         input_device_index=None,
         input_device_name=None,
         output_device_index=None,
@@ -72,6 +79,8 @@ class AssistantLoop:
         self.on_audio_data = on_audio_data
         self.on_transcription = on_transcription
         self.on_error = on_error
+        self.on_ready = on_ready
+        self.on_stopped = on_stopped
         self.input_device_index = input_device_index
         self.input_device_name = input_device_name
         self.output_device_index = output_device_index
@@ -204,6 +213,16 @@ class AssistantLoop:
     async def play_audio(self):
         stream = None
         pya_instance = pyaudio.PyAudio()
+        resolved_output = self.output_device_index
+        if resolved_output is None and self.output_device_name:
+            for i in range(pya_instance.get_device_count()):
+                try:
+                    info = pya_instance.get_device_info_by_index(i)
+                    if info["maxOutputChannels"] > 0 and self.output_device_name.lower() in info.get("name", "").lower():
+                        resolved_output = i
+                        break
+                except Exception:
+                    continue
         try:
             stream = await asyncio.to_thread(
                 pya_instance.open,
@@ -211,10 +230,24 @@ class AssistantLoop:
                 channels=CHANNELS,
                 rate=RECEIVE_SAMPLE_RATE,
                 output=True,
-                output_device_index=self.output_device_index,
+                output_device_index=resolved_output,
             )
         except Exception as e:
-            print(f"[KANA] Speaker open failed: {e}")
+            print(f"[KANA] Speaker open failed (device {resolved_output}): {e}")
+            if resolved_output is not None:
+                try:
+                    stream = await asyncio.to_thread(
+                        pya_instance.open,
+                        format=FORMAT,
+                        channels=CHANNELS,
+                        rate=RECEIVE_SAMPLE_RATE,
+                        output=True,
+                        output_device_index=None,
+                    )
+                    print("[KANA] Using default output device")
+                except Exception as e2:
+                    print(f"[KANA] Default device also failed: {e2}")
+                    stream = None
 
         try:
             while True:
@@ -240,28 +273,82 @@ class AssistantLoop:
             except Exception:
                 pass
 
+    def _user_message(self, e):
+        err_str = str(e)
+        if hasattr(e, "exceptions"):
+            err_str = " ".join(str(x) for x in e.exceptions)
+        err_lower = err_str.lower()
+        raw = err_str[:280].strip()
+
+        if "leaked" in err_lower:
+            return (
+                "Ключ Gemini помечен как скомпрометированный. "
+                "Создайте новый ключ: https://aistudio.google.com/apikey и укажите его в .env (GEMINI_API_KEY)."
+            )
+        if "not implemented" in err_lower or "not supported" in err_lower or "not enabled" in err_lower:
+            return (
+                "Live API недоступен для этого ключа или региона. "
+                "Проверьте: https://ai.google.dev/gemini-api/docs/live — возможно, нужен доступ по allowlist или другой регион. "
+                f"Ответ API: {raw}"
+            )
+        if "timeout" in err_lower:
+            return "Превышено время ожидания подключения к Gemini. Проверьте интернет и попробуйте снова."
+        if "403" in err_str or "forbidden" in err_lower:
+            return f"Доступ запрещён (403). Проверьте доступ к Live API. Ответ API: {raw}"
+        # «Неверный ключ» только если в ответе явно про ключ/авторизацию
+        if ("401" in err_str or "unauthorized" in err_lower) and any(
+            x in err_lower for x in ("key", "credential", "api_key", "apikey", "auth", "authenticate")
+        ):
+            return "Неверный API ключ. Проверьте GEMINI_API_KEY в файле .env (в папке backend или KANA)."
+        if "invalid" in err_lower and ("api key" in err_lower or "apikey" in err_lower or "api_key" in err_lower):
+            return "Неверный API ключ. Проверьте GEMINI_API_KEY в файле .env (в папке backend или KANA)."
+        return f"Ошибка подключения к Gemini: {raw}"
+
     async def run(self, start_message=None):
+        if not os.getenv("GEMINI_API_KEY"):
+            if self.on_error:
+                self.on_error(
+                    "Не задан GEMINI_API_KEY. Создайте ключ на https://aistudio.google.com/apikey и добавьте в .env: GEMINI_API_KEY=ваш_ключ"
+                )
+            if self.on_stopped:
+                self.on_stopped()
+            return
+
         while not self.stop_event.is_set():
+            will_retry = False
             try:
                 print("[KANA] Connecting to Gemini Live...")
-                async with (
-                    client.aio.live.connect(model=MODEL, config=config) as session,
-                    asyncio.TaskGroup() as tg,
-                ):
-                    self.session = session
-                    self.audio_in_queue = asyncio.Queue()
-                    self.out_queue = asyncio.Queue(maxsize=10)
+                connect_coro = client.aio.live.connect(model=MODEL, config=config)
+                session = await asyncio.wait_for(
+                    connect_coro.__aenter__(),
+                    timeout=CONNECT_TIMEOUT_SEC,
+                )
+                try:
+                    async with asyncio.TaskGroup() as tg:
+                        self.session = session
+                        self.audio_in_queue = asyncio.Queue()
+                        self.out_queue = asyncio.Queue(maxsize=10)
 
-                    tg.create_task(self.send_realtime())
-                    tg.create_task(self.listen_audio())
-                    tg.create_task(self.receive_audio())
-                    tg.create_task(self.play_audio())
+                        if self.on_ready:
+                            self.on_ready()
 
-                    if start_message:
-                        await self.session.send(input=start_message, end_of_turn=True)
+                        tg.create_task(self.send_realtime())
+                        tg.create_task(self.listen_audio())
+                        tg.create_task(self.receive_audio())
+                        tg.create_task(self.play_audio())
 
-                    await self.stop_event.wait()
+                        if start_message:
+                            await self.session.send(input=start_message, end_of_turn=True)
 
+                        await self.stop_event.wait()
+                finally:
+                    await connect_coro.__aexit__(None, None, None)
+
+            except asyncio.TimeoutError:
+                print("[KANA] Connection timeout")
+                if self.on_error:
+                    self.on_error(self._user_message(Exception("timeout")))
+                break
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -274,20 +361,11 @@ class AssistantLoop:
                     print(f"[KANA] Connection error: {e}")
                 if self.stop_event.is_set():
                     break
-                if "leaked" in err_str.lower():
-                    if self.on_error:
-                        self.on_error(
-                            "Ключ Gemini помечен как скомпрометированный. "
-                            "Создайте новый ключ: https://aistudio.google.com/apikey и укажите его в .env (GEMINI_API_KEY)."
-                        )
+                if self.on_error:
+                    self.on_error(self._user_message(e))
+                if "leaked" in err_str.lower() or "not implemented" in err_str.lower() or "not supported" in err_str.lower() or "not enabled" in err_str.lower():
                     break
-                if "not implemented" in err_str.lower() or "not supported" in err_str.lower() or "not enabled" in err_str.lower():
-                    if self.on_error:
-                        self.on_error(
-                            "Live API недоступен для этого ключа или региона. "
-                            "Проверьте: https://ai.google.dev/gemini-api/docs/live — возможно, нужен доступ по allowlist или другой регион."
-                        )
-                    break
+                will_retry = True
                 await asyncio.sleep(1)
 
             finally:
@@ -297,3 +375,5 @@ class AssistantLoop:
                     except Exception:
                         pass
                     self.audio_stream = None
+                if not will_retry and self.on_stopped:
+                    self.on_stopped()

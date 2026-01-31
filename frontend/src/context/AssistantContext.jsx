@@ -3,6 +3,28 @@ import { socket } from '../api/socket';
 
 const AssistantContext = createContext(null);
 
+const DANCE_KEYWORDS = ['танцуй', 'танец', 'потанцуй', 'станцуй', 'dance', 'танцевать', 'пляши'];
+
+const STORAGE_KEY_INPUT = 'kana_audio_input_device';
+const STORAGE_KEY_OUTPUT = 'kana_audio_output_device';
+const STORAGE_KEY_NOISE = 'kana_noise_suppression';
+
+function getStoredAudioSettings() {
+  try {
+    const inputRaw = localStorage.getItem(STORAGE_KEY_INPUT);
+    const outputRaw = localStorage.getItem(STORAGE_KEY_OUTPUT);
+    const input = inputRaw ? JSON.parse(inputRaw) : null;
+    const output = outputRaw ? JSON.parse(outputRaw) : null;
+    return {
+      inputDevice: input && typeof input === 'object' ? { index: input.index, name: input.name } : { index: null, name: '' },
+      outputDevice: output && typeof output === 'object' ? { index: output.index, name: output.name } : { index: null, name: '' },
+      noiseSuppression: localStorage.getItem(STORAGE_KEY_NOISE) !== 'false',
+    };
+  } catch {
+    return { inputDevice: { index: null, name: '' }, outputDevice: { index: null, name: '' }, noiseSuppression: true };
+  }
+}
+
 export function AssistantProvider({ children }) {
   const [connectionStatus, setConnectionStatus] = useState('disconnected');
   const [statusMessage, setStatusMessage] = useState('');
@@ -12,8 +34,12 @@ export function AssistantProvider({ children }) {
   const [error, setError] = useState(null);
   const [audioLevel, setAudioLevel] = useState(0);
   const [isAssistantSpeaking, setIsAssistantSpeaking] = useState(false);
+  const [audioSettings, setAudioSettings] = useState(getStoredAudioSettings);
+  const [sentenceEnded, setSentenceEnded] = useState(false);
+  const [danceRequested, setDanceRequested] = useState(false);
   const updateTimeoutRef = useRef(null);
   const audioLevelRef = useRef(0);
+  const wasAssistantSpeakingRef = useRef(false);
   const SPEAKING_THRESHOLD = 0.02;
   const SMOOTHING = 0.35;
 
@@ -31,6 +57,14 @@ export function AssistantProvider({ children }) {
       // Очищаем предыдущий таймер
       if (updateTimeoutRef.current) {
         clearTimeout(updateTimeoutRef.current);
+      }
+      
+      // Detect dance keywords in user messages
+      if (data.sender === 'User') {
+        const lower = data.text.toLowerCase();
+        if (DANCE_KEYWORDS.some((k) => lower.includes(k))) {
+          setDanceRequested(true);
+        }
       }
       
       setMessages((prev) => {
@@ -69,7 +103,15 @@ export function AssistantProvider({ children }) {
       const smoothed = audioLevelRef.current * (1 - SMOOTHING) + normalized * SMOOTHING;
       audioLevelRef.current = smoothed;
       setAudioLevel(smoothed);
-      setIsAssistantSpeaking(smoothed > SPEAKING_THRESHOLD);
+      
+      const isSpeakingNow = smoothed > SPEAKING_THRESHOLD;
+      setIsAssistantSpeaking(isSpeakingNow);
+      
+      // Detect sentence end: speaking stopped
+      if (wasAssistantSpeakingRef.current && !isSpeakingNow) {
+        setSentenceEnded(true);
+      }
+      wasAssistantSpeakingRef.current = isSpeakingNow;
     });
     socket.on('error', (data) => setError(data?.msg || 'Error'));
 
@@ -86,10 +128,23 @@ export function AssistantProvider({ children }) {
     };
   }, []);
 
-  const startAudio = useCallback(() => {
+  const startAudio = useCallback((deviceOverrides) => {
     setError(null);
-    socket.emit('start_audio', { muted: isMuted });
-  }, [isMuted]);
+    const input = deviceOverrides?.inputDevice ?? audioSettings.inputDevice;
+    const output = deviceOverrides?.outputDevice ?? audioSettings.outputDevice;
+    const payload = { muted: isMuted };
+    if (input?.index != null) {
+      payload.device_index = input.index;
+    } else if (input?.name) {
+      payload.device_name = input.name;
+    }
+    if (output?.index != null) {
+      payload.output_device_index = output.index;
+    } else if (output?.name) {
+      payload.output_device_name = output.name;
+    }
+    socket.emit('start_audio', payload);
+  }, [isMuted, audioSettings]);
 
   const stopAudio = useCallback(() => {
     socket.emit('stop_audio');
@@ -109,6 +164,8 @@ export function AssistantProvider({ children }) {
   }, []);
 
   const clearError = useCallback(() => setError(null), []);
+  const clearSentenceEnded = useCallback(() => setSentenceEnded(false), []);
+  const clearDanceRequested = useCallback(() => setDanceRequested(false), []);
 
   const value = {
     connectionStatus,
@@ -119,6 +176,12 @@ export function AssistantProvider({ children }) {
     error,
     audioLevel,
     isAssistantSpeaking,
+    audioSettings,
+    setAudioSettings,
+    sentenceEnded,
+    clearSentenceEnded,
+    danceRequested,
+    clearDanceRequested,
     startAudio,
     stopAudio,
     toggleMute,

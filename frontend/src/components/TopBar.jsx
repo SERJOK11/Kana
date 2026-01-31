@@ -1,8 +1,9 @@
-import React from 'react';
-import { Mic, MicOff, Power, PowerOff } from 'lucide-react';
+import React, { useState } from 'react';
+import { Mic, MicOff, Power, PowerOff, PanelRightClose, PanelRightOpen, Upload, Settings } from 'lucide-react';
 import { useAssistant } from '../context/AssistantContext';
+import AudioSettingsDropdown from './AudioSettingsDropdown';
 
-export default function TopBar() {
+export default function TopBar({ chatVisible, onToggleChat, onUploadAvatar }) {
   const {
     connectionStatus,
     statusMessage,
@@ -12,6 +13,8 @@ export default function TopBar() {
     stopAudio,
     toggleMute,
   } = useAssistant();
+
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   return (
     <header className="flex items-center justify-between px-4 py-2 bg-zinc-900 border-b border-zinc-800">
@@ -29,6 +32,40 @@ export default function TopBar() {
         )}
       </div>
       <div className="flex items-center gap-2">
+        {/* Hide/Show Chat Button */}
+        <button
+          onClick={onToggleChat}
+          className="p-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white transition-colors"
+          title={chatVisible ? 'Скрыть чат' : 'Показать чат'}
+        >
+          {chatVisible ? <PanelRightClose className="w-5 h-5" /> : <PanelRightOpen className="w-5 h-5" />}
+        </button>
+
+        {/* Upload Avatar Button */}
+        <button
+          onClick={onUploadAvatar}
+          className="p-2 rounded-lg bg-zinc-700 hover:bg-zinc-600 text-zinc-200 transition-colors"
+          title="Загрузить аватар"
+        >
+          <Upload className="w-5 h-5" />
+        </button>
+
+        {/* Audio Settings Button */}
+        <div className="relative">
+          <button
+            onClick={() => setSettingsOpen((o) => !o)}
+            className={`p-2 rounded-lg transition-colors ${
+              settingsOpen ? 'bg-emerald-600 text-white' : 'bg-zinc-700 hover:bg-zinc-600 text-zinc-200'
+            }`}
+            title="Настройки аудио"
+          >
+            <Settings className="w-5 h-5" />
+          </button>
+          {settingsOpen && (
+            <AudioSettingsDropdown onClose={() => setSettingsOpen(false)} />
+          )}
+        </div>
+
         {!isListening ? (
           <button
             onClick={startAudio}
